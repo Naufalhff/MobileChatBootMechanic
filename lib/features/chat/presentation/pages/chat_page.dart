@@ -2,39 +2,88 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../../../../core/constants/app_colors.dart';
+import '../../data/models/ai_model_model.dart';
 import '../cubit/chat_cubit.dart';
 import '../widgets/chat_bubble.dart';
 
 class ChatPage extends StatefulWidget {
   final String? initialMotor;
-  const ChatPage({Key? key, this.initialMotor}) : super(key: key);
+  final String? initialModel;
+  final int? conversationId;
+
+  const ChatPage({
+    Key? key,
+    this.initialMotor,
+    this.initialModel,
+    this.conversationId,
+  }) : super(key: key);
 
   @override
   State<ChatPage> createState() => _ChatPageState();
 }
 
 class _ChatPageState extends State<ChatPage> {
+  static const String _selectedModelPrefKey = 'selected_ai_model';
+
   final _messageController = TextEditingController();
   final _scrollController = ScrollController();
+  final _modelSearchController = TextEditingController();
   final _picker = ImagePicker();
 
   String? _selectedMotor;
+  String? _selectedModelId;
   String? _attachedImagePath;
 
   @override
   void initState() {
     super.initState();
     _selectedMotor = widget.initialMotor;
+    _selectedModelId = widget.initialModel;
+    _loadSavedModel();
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      context.read<ChatCubit>().loadChat();
+      context.read<ChatCubit>().loadChat(
+            conversationId: widget.conversationId,
+          );
     });
+  }
+
+  Future<void> _loadSavedModel() async {
+    if (widget.initialModel != null) return;
+    final prefs = await SharedPreferences.getInstance();
+    final saved = prefs.getString(_selectedModelPrefKey);
+    if (saved != null && saved.isNotEmpty && mounted) {
+      setState(() {
+        _selectedModelId = saved;
+      });
+    }
+  }
+
+  void _startNewChat() {
+    Navigator.of(context).pushReplacement(
+      MaterialPageRoute(
+        builder: (_) => ChatPage(
+          initialMotor: _selectedMotor,
+          initialModel: _selectedModelId,
+        ),
+      ),
+    );
+  }
+
+  Future<void> _selectModel(String modelId) async {
+    setState(() {
+      _selectedModelId = modelId;
+    });
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_selectedModelPrefKey, modelId);
   }
 
   @override
   void dispose() {
     _messageController.dispose();
     _scrollController.dispose();
+    _modelSearchController.dispose();
     super.dispose();
   }
 
@@ -73,6 +122,9 @@ class _ChatPageState extends State<ChatPage> {
   }
 
   void _sendMessage() {
+    final chatState = context.read<ChatCubit>().state;
+    if (chatState is ChatLoaded && chatState.isSending) return;
+
     final text = _messageController.text.trim();
     if (text.isEmpty && _attachedImagePath == null) return;
 
@@ -86,9 +138,24 @@ class _ChatPageState extends State<ChatPage> {
       return;
     }
 
+    final selectedModel = _findSelectedModel();
+    if (_attachedImagePath != null && selectedModel?.supportsVision == false) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            'Model ${selectedModel!.label} tidak mendukung analisis gambar. '
+            'Pilih model lain atau hapus lampiran foto.',
+          ),
+          backgroundColor: AppColors.warning,
+        ),
+      );
+      return;
+    }
+
     context.read<ChatCubit>().sendMessage(
           message: text,
           motorModel: _selectedMotor!,
+          model: _selectedModelId,
           localImagePath: _attachedImagePath,
         );
 
@@ -149,6 +216,16 @@ class _ChatPageState extends State<ChatPage> {
           ],
         ),
         centerTitle: true,
+        actions: [
+          IconButton(
+            icon: const Icon(
+              Icons.add_comment_outlined,
+              color: AppColors.textPrimary,
+            ),
+            tooltip: 'Sesi Baru',
+            onPressed: _startNewChat,
+          ),
+        ],
       ),
       body: BlocConsumer<ChatCubit, ChatState>(
           listener: (context, state) {
@@ -174,7 +251,9 @@ class _ChatPageState extends State<ChatPage> {
                       Text(state.message, textAlign: TextAlign.center),
                       const SizedBox(height: 24),
                       ElevatedButton(
-                        onPressed: () => context.read<ChatCubit>().loadChat(),
+                        onPressed: () => context.read<ChatCubit>().loadChat(
+                              conversationId: widget.conversationId,
+                            ),
                         child: const Text('Coba Lagi'),
                       ),
                     ],
@@ -188,9 +267,23 @@ class _ChatPageState extends State<ChatPage> {
                 _selectedMotor = widget.initialMotor ?? (state.supportedMotors.first['model_name'] ?? '').toString();
               }
 
-              final filteredMessages = state.messages
-                  .where((msg) => msg.motorModel == _selectedMotor)
-                  .toList();
+              if (state.aiModels.isNotEmpty) {
+                final isKnown = state.aiModels
+                    .any((model) => model.id == _selectedModelId);
+                if (_selectedModelId == null || !isKnown) {
+                  final preferred = state.defaultModel;
+                  final hasPreferred = preferred != null &&
+                      state.aiModels.any((model) => model.id == preferred);
+                  _selectedModelId =
+                      hasPreferred ? preferred : state.aiModels.first.id;
+                }
+              }
+
+              final filteredMessages = state.conversationId != null
+                  ? state.messages
+                  : state.messages
+                      .where((msg) => msg.motorModel == _selectedMotor)
+                      .toList();
 
               return Column(
                 children: [
@@ -248,6 +341,7 @@ class _ChatPageState extends State<ChatPage> {
                         ],
                       ),
                     ),
+                  if (state.aiModels.isNotEmpty) _buildModelSelector(state),
                   Container(
                     color: Colors.transparent,
                     padding: EdgeInsets.only(
@@ -314,12 +408,25 @@ class _ChatPageState extends State<ChatPage> {
                                 minWidth: 40,
                                 minHeight: 40,
                               ),
-                              icon: const Icon(
-                                Icons.arrow_upward_rounded,
-                                color: Colors.white,
-                                size: 20,
-                              ),
-                              onPressed: _sendMessage,
+                              icon: state.isSending
+                                  ? const SizedBox(
+                                      width: 18,
+                                      height: 18,
+                                      child: CircularProgressIndicator(
+                                        strokeWidth: 2,
+                                        valueColor:
+                                            AlwaysStoppedAnimation<Color>(
+                                          Colors.white,
+                                        ),
+                                      ),
+                                    )
+                                  : const Icon(
+                                      Icons.arrow_upward_rounded,
+                                      color: Colors.white,
+                                      size: 20,
+                                    ),
+                              onPressed:
+                                  state.isSending ? null : _sendMessage,
                             ),
                           ),
                         ],
@@ -333,6 +440,283 @@ class _ChatPageState extends State<ChatPage> {
             return const SizedBox();
           },
         ),
+    );
+  }
+
+  AiModel? _findSelectedModel() {
+    final state = context.read<ChatCubit>().state;
+    if (state is! ChatLoaded) return null;
+    for (final model in state.aiModels) {
+      if (model.id == _selectedModelId) return model;
+    }
+    return null;
+  }
+
+  Widget _buildModelSelector(ChatLoaded state) {
+    final selected = state.aiModels.firstWhere(
+      (model) => model.id == _selectedModelId,
+      orElse: () => state.aiModels.first,
+    );
+
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(20, 0, 20, 2),
+      child: Row(
+        children: [
+          const Icon(
+            Icons.memory_rounded,
+            size: 14,
+            color: AppColors.textSecondary,
+          ),
+          const SizedBox(width: 6),
+          const Text(
+            'Model AI',
+            style: TextStyle(
+              fontSize: 11,
+              color: AppColors.textSecondary,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Align(
+              alignment: Alignment.centerLeft,
+              child: InkWell(
+                borderRadius: BorderRadius.circular(14),
+                onTap: () => _showModelPicker(state.aiModels),
+                child: Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 10,
+                    vertical: 5,
+                  ),
+                  decoration: BoxDecoration(
+                    color: AppColors.surface,
+                    borderRadius: BorderRadius.circular(14),
+                    border: Border.all(color: const Color(0xFFE2E8F0)),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      if (selected.isCombo) ...[
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 5,
+                            vertical: 1,
+                          ),
+                          decoration: BoxDecoration(
+                            color: AppColors.primary.withOpacity(0.12),
+                            borderRadius: BorderRadius.circular(4),
+                          ),
+                          child: const Text(
+                            'COMBO',
+                            style: TextStyle(
+                              fontSize: 8,
+                              fontWeight: FontWeight.bold,
+                              color: AppColors.primary,
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 6),
+                      ],
+                      Flexible(
+                        child: Text(
+                          selected.label,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            fontSize: 11.5,
+                            color: AppColors.textPrimary,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 4),
+                      const Icon(
+                        Icons.keyboard_arrow_down_rounded,
+                        size: 16,
+                        color: AppColors.textSecondary,
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _showModelPicker(List<AiModel> models) async {
+    _modelSearchController.clear();
+
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: AppColors.surface,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (sheetContext) {
+        return StatefulBuilder(
+          builder: (context, setSheetState) {
+            final query = _modelSearchController.text.trim().toLowerCase();
+            final filtered = query.isEmpty
+                ? models
+                : models
+                    .where(
+                      (model) =>
+                          model.id.toLowerCase().contains(query) ||
+                          model.label.toLowerCase().contains(query),
+                    )
+                    .toList();
+
+            return Padding(
+              padding: EdgeInsets.only(
+                bottom: MediaQuery.of(context).viewInsets.bottom,
+              ),
+              child: SizedBox(
+                height: MediaQuery.of(context).size.height * 0.6,
+                child: Column(
+                  children: [
+                    Container(
+                      width: 36,
+                      height: 4,
+                      margin: const EdgeInsets.only(top: 10, bottom: 8),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFE2E8F0),
+                        borderRadius: BorderRadius.circular(2),
+                      ),
+                    ),
+                    const Text(
+                      'Pilih Model AI',
+                      style: TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.bold,
+                        color: AppColors.textPrimary,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 16),
+                      child: TextField(
+                        controller: _modelSearchController,
+                        onChanged: (_) => setSheetState(() {}),
+                        decoration: InputDecoration(
+                          hintText: 'Cari model...',
+                          prefixIcon: const Icon(
+                            Icons.search_rounded,
+                            size: 20,
+                          ),
+                          isDense: true,
+                          filled: true,
+                          fillColor: const Color(0xFFF1F5F9),
+                          border: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(12),
+                            borderSide: BorderSide.none,
+                          ),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Expanded(
+                      child: filtered.isEmpty
+                          ? const Center(
+                              child: Text(
+                                'Model tidak ditemukan.',
+                                style: TextStyle(
+                                  color: AppColors.textSecondary,
+                                  fontSize: 13,
+                                ),
+                              ),
+                            )
+                          : ListView.builder(
+                              itemCount: filtered.length,
+                              itemBuilder: (context, index) {
+                                final model = filtered[index];
+                                final isSelected = model.id == _selectedModelId;
+                                return ListTile(
+                                  dense: true,
+                                  leading: Icon(
+                                    isSelected
+                                        ? Icons.check_circle_rounded
+                                        : Icons.memory_rounded,
+                                    color: isSelected
+                                        ? AppColors.primary
+                                        : AppColors.textDisabled,
+                                    size: 20,
+                                  ),
+                                  title: Text(
+                                    model.label,
+                                    style: TextStyle(
+                                      fontSize: 13.5,
+                                      fontWeight: isSelected
+                                          ? FontWeight.bold
+                                          : FontWeight.normal,
+                                      color: AppColors.textPrimary,
+                                    ),
+                                  ),
+                                  subtitle: model.label == model.id
+                                      ? null
+                                      : Text(
+                                          model.id,
+                                          style: const TextStyle(
+                                            fontSize: 10.5,
+                                            color: AppColors.textSecondary,
+                                          ),
+                                        ),
+                                  trailing: Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      if (model.isCombo)
+                                        _buildModelBadge(
+                                          'COMBO',
+                                          AppColors.primary,
+                                        ),
+                                      if (model.supportsVision == true) ...[
+                                        if (model.isCombo)
+                                          const SizedBox(width: 4),
+                                        _buildModelBadge(
+                                          'VISION',
+                                          AppColors.success,
+                                        ),
+                                      ],
+                                    ],
+                                  ),
+                                  onTap: () async {
+                                    final navigator = Navigator.of(sheetContext);
+                                    await _selectModel(model.id);
+                                    navigator.pop();
+                                  },
+                                );
+                              },
+                            ),
+                    ),
+                  ],
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
+
+  }
+
+  Widget _buildModelBadge(String label, Color color) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+      decoration: BoxDecoration(
+        color: color.withOpacity(0.12),
+        borderRadius: BorderRadius.circular(4),
+      ),
+      child: Text(
+        label,
+        style: TextStyle(
+          fontSize: 8,
+          fontWeight: FontWeight.bold,
+          color: color,
+        ),
+      ),
     );
   }
 

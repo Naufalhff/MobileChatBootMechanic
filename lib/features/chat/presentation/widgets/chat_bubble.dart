@@ -70,6 +70,21 @@ class ChatBubble extends StatelessWidget {
                       fontWeight: FontWeight.bold,
                     ),
                   ),
+                  if (message.aiModel != null &&
+                      message.aiModel!.isNotEmpty) ...[
+                    const SizedBox(width: 6),
+                    Flexible(
+                      child: Text(
+                        '· ${message.aiModel}',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          color: AppColors.textSecondary,
+                          fontSize: 10,
+                        ),
+                      ),
+                    ),
+                  ],
                 ],
               ),
             ),

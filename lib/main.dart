@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
+import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'core/constants/app_colors.dart';
 import 'core/theme/app_theme.dart';
 import 'core/network/api_client.dart';
@@ -10,10 +11,12 @@ import 'features/auth/presentation/pages/onboarding_page.dart';
 import 'features/chat/data/datasources/chat_remote_datasource.dart';
 import 'features/chat/data/repositories/chat_repository_impl.dart';
 import 'features/chat/presentation/cubit/chat_cubit.dart';
+import 'features/chat/presentation/cubit/conversation_cubit.dart';
 import 'features/chat/presentation/pages/main_shell.dart';
 
-void main() {
+void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  await dotenv.load(fileName: ".env");
 
   final apiClient = ApiClient();
 
@@ -36,6 +39,9 @@ void main() {
           ),
           BlocProvider<ChatCubit>(
             create: (context) => ChatCubit(chatRepository),
+          ),
+          BlocProvider<ConversationCubit>(
+            create: (context) => ConversationCubit(chatRepository),
           ),
         ],
         child: const PocketMechanicApp(),

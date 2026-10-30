@@ -66,6 +66,22 @@ class ApiClient {
     }
   }
 
+  Future<Response> delete(
+    String path, {
+    Map<String, dynamic>? queryParameters,
+    Options? options,
+  }) async {
+    try {
+      return await _dio.delete(
+        path,
+        queryParameters: queryParameters,
+        options: options,
+      );
+    } on DioException catch (e) {
+      throw _handleError(e);
+    }
+  }
+
   Future<Response> postMultipart(
     String path, {
     required Map<String, dynamic> data,

@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_bloc/flutter_bloc.dart';
 import '../../../../core/constants/app_colors.dart';
+import '../cubit/conversation_cubit.dart';
 import 'dashboard_tab.dart';
 import 'history_tab.dart';
 import 'settings_tab.dart';
@@ -65,6 +67,9 @@ class _MainShellState extends State<MainShell> {
         setState(() {
           _selectedIndex = index;
         });
+        if (index == 1) {
+          context.read<ConversationCubit>().load();
+        }
       },
       behavior: HitTestBehavior.opaque,
       child: Padding(
